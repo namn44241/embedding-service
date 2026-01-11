@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  embedding-service:
+    build: .
+    container_name: bge-m3-embedding-service
+    ports:
+      - "3004:3004"
+    environment:
+      - MODEL_NAME=BAAI/bge-m3
+      - EMBEDDING_DIM=1024
+      - HOST=0.0.0.0
+      - PORT=3004
+      - LOG_LEVEL=INFO
+    volumes:
+      # Cache model downloads
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+
