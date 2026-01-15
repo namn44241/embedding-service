@@ -1,6 +1,7 @@
 """Configuration for embedding service."""
 
 import os
+from typing import Optional
 from pydantic_settings import BaseSettings
 
 
@@ -17,6 +18,9 @@ class Settings(BaseSettings):
     
     # Logging configuration
     log_level: str = "INFO"
+    
+    # Vector store configuration
+    vector_store_path: Optional[str] = None  # None means use default path
     
     class Config:
         env_file = ".env"
