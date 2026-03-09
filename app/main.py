@@ -2,6 +2,7 @@
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import numpy as np
@@ -99,6 +100,25 @@ class SearchResult(BaseModel):
     text: str
     score: float
     metadata: Optional[Dict[str, Any]] = None
+
+
+class BatchQueryItem(BaseModel):
+    text: str = Field(..., min_length=1, description="Query text")
+    k: int = Field(10, ge=1, le=100, description="Number of top results for this query")
+
+
+class BatchSearchRequest(BaseModel):
+    queries: List[BatchQueryItem] = Field(..., min_length=1, description="List of queries to search")
+    normalize: bool = Field(True, description="Whether to normalize query embeddings")
+
+
+class BatchSearchResultItem(BaseModel):
+    query_text: str
+    results: List[SearchResult]
+
+
+class BatchSearchResponse(BaseModel):
+    results: List[BatchSearchResultItem]
 
 
 class SearchResponse(BaseModel):
@@ -346,6 +366,54 @@ async def search_texts(request: SearchRequest):
     except Exception as e:
         logger.error(f"Failed to search texts: {e}")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@app.post("/search/batch", response_model=BatchSearchResponse)
+async def search_batch(request: BatchSearchRequest):
+    """Search for top k similar texts for multiple queries in a single batch.
+
+    Encodes all query texts in ONE model call, then performs FAISS search for each.
+    Significantly faster than calling /search N times sequentially.
+    """
+    try:
+        if not embedding_service.is_model_loaded():
+            raise HTTPException(status_code=503, detail="Model not loaded")
+
+        if not vector_store.is_initialized() or vector_store.ntotal == 0:
+            raise HTTPException(status_code=404, detail="Vector store is empty")
+
+        texts = [q.text for q in request.queries]
+
+        # Encode ALL texts in one batch call (non-blocking via threadpool)
+        embeddings = await run_in_threadpool(
+            embedding_service.encode, texts, request.normalize
+        )
+
+        # FAISS search for each query (fast, not CPU-bound)
+        results = []
+        for query, embedding in zip(request.queries, embeddings):
+            distances, indices, metadata_list = vector_store.search(
+                query_embedding=embedding,
+                k=query.k
+            )
+            matches = [
+                SearchResult(
+                    id=int(idx),
+                    text=meta.get("text", ""),
+                    score=float(dist),
+                    metadata={k: v for k, v in meta.items() if k not in ["id", "text"]}
+                )
+                for dist, idx, meta in zip(distances, indices, metadata_list)
+            ]
+            results.append(BatchSearchResultItem(query_text=query.text, results=matches))
+
+        return BatchSearchResponse(results=results)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to batch search: {e}")
+        raise HTTPException(status_code=500, detail=f"Batch search failed: {str(e)}")
 
 
 @app.get("/store/stats", response_model=VectorStoreStatsResponse)
